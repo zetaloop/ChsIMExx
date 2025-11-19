@@ -54,6 +54,7 @@ const STOP_EVENT_NAME: PCWSTR = w!("Global\\ChsIMExxStop");
 const INSTANCE_MUTEX_NAME: PCWSTR = w!("Global\\ChsIMExxMutex");
 const POWERSHELL_APP_ID: &str =
     "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
     process::exit(match run() {
@@ -66,29 +67,41 @@ fn run() -> Result<(), i32> {
     match parse_command()? {
         Command::Run => run_start(),
         Command::Stop => run_stop(),
+        Command::Version => run_version(),
     }
 }
 
 enum Command {
     Run,
     Stop,
+    Version,
 }
 
 fn parse_command() -> Result<Command, i32> {
     let mut args = env::args().skip(1);
     match args.next() {
         None => Ok(Command::Run),
-        Some(arg) if arg.eq_ignore_ascii_case("stop") => {
-            if args.next().is_some() {
-                eprintln!("额外参数无法识别");
-                Err(1)
-            } else {
-                Ok(Command::Stop)
-            }
-        }
         Some(arg) => {
-            eprintln!("未知参数：{arg}");
-            Err(1)
+            let cmd = arg.as_str();
+            let rest_has_extra = args.next().is_some();
+
+            let result = match cmd {
+                "stop" | "--stop" => Some(Command::Stop),
+                "version" | "--version" => Some(Command::Version),
+                _ => None,
+            };
+
+            match (result, rest_has_extra) {
+                (Some(command), false) => Ok(command),
+                (Some(_), true) => {
+                    eprintln!("额外参数无法识别");
+                    Err(1)
+                }
+                (None, _) => {
+                    eprintln!("未知参数：{cmd}");
+                    Err(1)
+                }
+            }
         }
     }
 }
@@ -132,6 +145,11 @@ fn run_stop() -> Result<(), i32> {
         return Err(1);
     }
     notify("ChsIMExx 已关闭");
+    Ok(())
+}
+
+fn run_version() -> Result<(), i32> {
+    println!("ChsIMExx {VERSION}");
     Ok(())
 }
 
