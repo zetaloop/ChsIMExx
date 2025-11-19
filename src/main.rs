@@ -100,11 +100,11 @@ fn parse_command() -> Result<Command, i32> {
             match (result, rest_has_extra) {
                 (Some(command), false) => Ok(command),
                 (Some(_), true) => {
-                    eprintln!("额外参数无法识别");
+                    log_error("额外参数无法识别");
                     Err(1)
                 }
                 (None, _) => {
-                    eprintln!("未知参数：{cmd}");
+                    log_error(&format!("未知参数：{cmd}"));
                     Err(1)
                 }
             }
@@ -114,19 +114,19 @@ fn parse_command() -> Result<Command, i32> {
 
 fn run_start() -> Result<(), i32> {
     let mut guard = InstanceGuard::new().map_err(|err| {
-        eprintln!("创建同步对象失败: {err:?}");
+        log_error(&format!("创建同步对象失败: {err:?}"));
         1
     })?;
 
     let state = guard.acquire().map_err(|msg| {
-        eprintln!("{msg}");
+        log_error(&msg);
         1
     })?;
 
     let hook = unsafe {
         SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0).map_err(
             |err| {
-                eprintln!("安装键盘钩子失败: {err:?}");
+                log_error(&format!("安装键盘钩子失败: {err:?}"));
                 1
             },
         )?
@@ -162,7 +162,7 @@ fn run_stop() -> Result<(), i32> {
             Ok(())
         }
         Err(msg) => {
-            eprintln!("{msg}");
+            log_error(&msg);
             Err(1)
         }
     }
@@ -257,13 +257,22 @@ impl Drop for InstanceGuard {
 
 fn notify(message: &str) {
     if let Err(err) = send_toast(message) {
-        eprintln!("发送通知失败: {err:?}");
+        log_error(&format!("发送通知失败: {err:?}"));
     }
 }
 
 fn log_to_console(message: &str) {
     if let Some(console) = ConsoleSession::attach_temporary() {
         console.println(&format!("\r\n[ChsIME] {message}"));
+    }
+}
+
+fn log_error(message: &str) {
+    eprintln!("{message}");
+    if let Some(console) = ConsoleSession::attach_temporary() {
+        console.println(&format!("\r\n[ChsIME][错误] {message}"));
+    } else if let Some(console) = ConsoleSession::ensure() {
+        console.println(&format!("\r\n[ChsIME][错误] {message}"));
     }
 }
 
