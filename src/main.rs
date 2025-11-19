@@ -7,8 +7,13 @@ use windows::{
     UI::Notifications::{ToastNotification, ToastNotificationManager},
     Win32::{
         Foundation::{
-            CloseHandle, HANDLE, LPARAM, LRESULT, WAIT_ABANDONED, WAIT_EVENT, WAIT_FAILED,
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, GetLastError, HANDLE,
+            INVALID_HANDLE_VALUE, LPARAM, LRESULT, WAIT_ABANDONED, WAIT_EVENT, WAIT_FAILED,
             WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+        },
+        System::Console::{
+            ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, FreeConsole, GetStdHandle,
+            STD_OUTPUT_HANDLE, WriteConsoleW,
         },
         System::Threading::{
             CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, MUTEX_MODIFY_STATE,
@@ -126,10 +131,12 @@ fn run_start() -> Result<(), i32> {
         )?
     };
 
-    match state {
-        InstanceState::Fresh => notify("ChsIMExx 已开启"),
-        InstanceState::Restarted => notify("ChsIMExx 已重启"),
-    }
+    let message = match state {
+        InstanceState::Fresh => "ChsIMExx 已开启",
+        InstanceState::Restarted => "ChsIMExx 已重启",
+    };
+    notify(message);
+    log_to_console(message);
 
     unsafe {
         run_message_loop(guard.stop_event());
@@ -144,13 +151,19 @@ fn run_stop() -> Result<(), i32> {
         eprintln!("{msg}");
         return Err(1);
     }
-    notify("ChsIMExx 已关闭");
+    const MESSAGE: &str = "ChsIMExx 已关闭";
+    notify(MESSAGE);
+    log_to_console(MESSAGE);
     Ok(())
 }
 
 fn run_version() -> Result<(), i32> {
-    println!("ChsIMExx {VERSION}");
-    Ok(())
+    if let Some(console) = ConsoleSession::ensure() {
+        console.println(&format!("ChsIMExx {VERSION}"));
+        Ok(())
+    } else {
+        Err(1)
+    }
 }
 
 enum InstanceState {
@@ -235,6 +248,12 @@ fn notify(message: &str) {
     }
 }
 
+fn log_to_console(message: &str) {
+    if let Some(console) = ConsoleSession::attach_temporary() {
+        console.println(message);
+    }
+}
+
 fn send_toast(message: &str) -> core::Result<()> {
     let xml = format!(
         "<toast><visual><binding template=\"ToastGeneric\"><text>ChsIMExx</text><text>{}</text></binding></visual></toast>",
@@ -307,6 +326,75 @@ fn signal_shutdown_request() -> Result<(), String> {
         }
 
         Ok(())
+    }
+}
+
+struct ConsoleSession {
+    release_on_drop: bool,
+}
+
+impl ConsoleSession {
+    fn attach_temporary() -> Option<Self> {
+        Self::attach(true)
+    }
+
+    fn ensure() -> Option<Self> {
+        if let Some(session) = Self::attach(false) {
+            return Some(session);
+        }
+        unsafe {
+            if AllocConsole().is_ok() {
+                Some(Self {
+                    release_on_drop: false,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    fn attach(release_on_drop: bool) -> Option<Self> {
+        unsafe {
+            match AttachConsole(ATTACH_PARENT_PROCESS) {
+                Ok(()) => Some(Self { release_on_drop }),
+                Err(_) => match GetLastError() {
+                    err if err == ERROR_ACCESS_DENIED => Some(Self {
+                        release_on_drop: false,
+                    }),
+                    err if err == ERROR_INVALID_HANDLE => None,
+                    _ => None,
+                },
+            }
+        }
+    }
+
+    fn println(&self, message: &str) {
+        write_console_line(message);
+    }
+}
+
+impl Drop for ConsoleSession {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            let _ = unsafe { FreeConsole() };
+        }
+    }
+}
+
+fn write_console_line(message: &str) {
+    unsafe {
+        let handle = match GetStdHandle(STD_OUTPUT_HANDLE) {
+            Ok(handle) => handle,
+            Err(_) => return,
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_invalid() {
+            return;
+        }
+        let mut buffer: Vec<u16> = message.encode_utf16().collect();
+        buffer.push('\r' as u16);
+        buffer.push('\n' as u16);
+        let mut written = 0;
+        let _ = WriteConsoleW(handle, &buffer, Some(&mut written), None);
     }
 }
 
