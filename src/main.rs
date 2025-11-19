@@ -158,8 +158,10 @@ fn run_stop() -> Result<(), i32> {
 }
 
 fn run_version() -> Result<(), i32> {
+    let message = format!("ChsIMExx {VERSION}");
+    notify(&message);
     if let Some(console) = ConsoleSession::ensure() {
-        console.println(&format!("ChsIMExx {VERSION}"));
+        console.println(&message);
         Ok(())
     } else {
         Err(1)
