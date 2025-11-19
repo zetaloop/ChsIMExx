@@ -5,15 +5,18 @@ use std::mem::size_of;
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::{
-        Input::KeyboardAndMouse::{
-            GetAsyncKeyState, GetKeyboardLayout, HKL, INPUT, INPUT_0, INPUT_KEYBOARD,
-            KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput,
-            VIRTUAL_KEY,
+        Input::{
+            Ime::{IME_CMODE_NATIVE, ImmGetDefaultIMEWnd},
+            KeyboardAndMouse::{
+                GetAsyncKeyState, GetKeyboardLayout, HKL, INPUT, INPUT_0, INPUT_KEYBOARD,
+                KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput,
+                VIRTUAL_KEY,
+            },
         },
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW,
-            GetWindowThreadProcessId, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
-            TranslateMessage, WH_KEYBOARD_LL,
+            GetWindowThreadProcessId, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, SendMessageW,
+            SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL,
         },
     },
 };
@@ -88,22 +91,49 @@ unsafe extern "system" fn low_level_keyboard_proc(
     unsafe { CallNextHookEx(HOOK_HANDLE, n_code, w_param, l_param) }
 }
 
-// 检查当前前台窗口所在线程的键盘布局是否为中文
+// 只在：当前键盘布局是中文，并且 IME 处于“中文模式”时返回 true
 unsafe fn is_chinese_input_for_foreground() -> bool {
+    // 先锁定前台窗口
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return false;
     }
 
+    // 通过线程拿到 HKL，只在主语言是中文时继续往下
     let mut _pid = 0u32;
     let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut _pid)) };
 
-    // 获取该线程当前输入语言
     let hkl: HKL = unsafe { GetKeyboardLayout(tid) };
     let lang_id = hkl.0 as u32 & 0xFFFF;
-    let primary_lang = lang_id & 0x3FF; // 低 10 位是主语言 ID，0x04 代表中文 :contentReference[oaicite:0]{index=0}
+    let primary_lang = lang_id & 0x3FF;
+    if primary_lang != LANG_CHINESE {
+        // ENG、美式键盘等直接视为“非中文模式”
+        return false;
+    }
 
-    primary_lang == LANG_CHINESE
+    // 拿到这个窗口对应的 IME 窗口句柄
+    let ime_hwnd = unsafe { ImmGetDefaultIMEWnd(hwnd) };
+    if ime_hwnd.0.is_null() {
+        // 理论上不太会发生，如果拿不到就保守地当作“非中文模式”
+        return false;
+    }
+
+    // 通过 WM_IME_CONTROL 询问当前转换模式
+    const WM_IME_CONTROL: u32 = 0x0283;
+    const IMC_GETCONVERSIONMODE: usize = 0x0001; // wParam 值
+
+    let mode = unsafe {
+        SendMessageW(
+            ime_hwnd,
+            WM_IME_CONTROL,
+            Some(WPARAM(IMC_GETCONVERSIONMODE)),
+            Some(LPARAM(0)),
+        )
+    }
+    .0 as u32;
+
+    // 只有在“本地语言模式”（微软拼音的中文模式）下，这一位才为 1
+    mode & IME_CMODE_NATIVE.0 != 0
 }
 
 // 通过 SendInput 发送一个 Unicode 字符
