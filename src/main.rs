@@ -132,8 +132,8 @@ fn run_start() -> Result<(), i32> {
     };
 
     let message = match state {
-        InstanceState::Fresh => "ChsIMExx 已开启",
-        InstanceState::Restarted => "ChsIMExx 已重启",
+        InstanceState::Fresh => "已开启",
+        InstanceState::Restarted => "已重新开启",
     };
     notify(message);
     log_to_console(message);
@@ -147,21 +147,31 @@ fn run_start() -> Result<(), i32> {
 }
 
 fn run_stop() -> Result<(), i32> {
-    if let Err(msg) = signal_shutdown_request() {
-        eprintln!("{msg}");
-        return Err(1);
+    match signal_shutdown_request() {
+        Ok(Some(_)) => {
+            const MESSAGE: &str = "已关闭";
+            notify(MESSAGE);
+            log_to_console(MESSAGE);
+            Ok(())
+        }
+        Ok(None) => {
+            const MESSAGE: &str = "无需关闭";
+            notify(MESSAGE);
+            log_to_console(MESSAGE);
+            Ok(())
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            Err(1)
+        }
     }
-    const MESSAGE: &str = "ChsIMExx 已关闭";
-    notify(MESSAGE);
-    log_to_console(MESSAGE);
-    Ok(())
 }
 
 fn run_version() -> Result<(), i32> {
-    let message = format!("ChsIMExx {VERSION}");
+    let message = format!("v{VERSION}");
     notify(&message);
     if let Some(console) = ConsoleSession::ensure() {
-        console.println(&message);
+        console.println(&format!("\r\n[ChsIME] {message}"));
         Ok(())
     } else {
         Err(1)
@@ -252,7 +262,7 @@ fn notify(message: &str) {
 
 fn log_to_console(message: &str) {
     if let Some(console) = ConsoleSession::attach_temporary() {
-        console.println(message);
+        console.println(&format!("\r\n[ChsIME] {message}"));
     }
 }
 
@@ -301,7 +311,7 @@ fn drain_message_queue(msg: &mut MSG) {
     }
 }
 
-fn signal_shutdown_request() -> Result<(), String> {
+fn signal_shutdown_request() -> Result<Option<()>, String> {
     unsafe {
         let event = OpenEventW(
             EVENT_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
@@ -325,9 +335,10 @@ fn signal_shutdown_request() -> Result<(), String> {
                 }
                 let _ = CloseHandle(mutex);
             }
+            Ok(Some(()))
+        } else {
+            Ok(None)
         }
-
-        Ok(())
     }
 }
 
