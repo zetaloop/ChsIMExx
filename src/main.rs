@@ -42,6 +42,8 @@ const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_SYSKEYUP: u32 = 0x0105;
 
 const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12; // Alt / AltGr
 const VK_OEM_4: u32 = 0xDB; // [
 const VK_OEM_6: u32 = 0xDD; // ]
 
@@ -307,10 +309,13 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let is_bracket = vk == VK_OEM_4 || vk == VK_OEM_6;
 
         let shift_down = unsafe { GetAsyncKeyState(VK_SHIFT) < 0 };
+        let other_modifiers_down =
+            unsafe { GetAsyncKeyState(VK_CONTROL) < 0 || GetAsyncKeyState(VK_MENU) < 0 };
 
         if (is_keydown || is_keyup)
             && is_bracket
             && shift_down
+            && !other_modifiers_down
             && kb.flags.0 & LLKHF_INJECTED == 0
             && unsafe { is_chinese_input_for_foreground() }
         {
