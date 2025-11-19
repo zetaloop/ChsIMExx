@@ -1,24 +1,39 @@
 #![windows_subsystem = "windows"]
 
-use std::mem::size_of;
+use std::{env, mem::size_of, process};
 
-use windows::Win32::{
-    Foundation::{LPARAM, LRESULT, WPARAM},
-    UI::{
-        Input::{
-            Ime::{IME_CMODE_NATIVE, ImmGetDefaultIMEWnd},
-            KeyboardAndMouse::{
-                GetAsyncKeyState, GetKeyboardLayout, HKL, INPUT, INPUT_0, INPUT_KEYBOARD,
-                KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput,
-                VIRTUAL_KEY,
+use windows::{
+    Data::Xml::Dom::XmlDocument,
+    UI::Notifications::{ToastNotification, ToastNotificationManager},
+    Win32::{
+        Foundation::{
+            CloseHandle, HANDLE, LPARAM, LRESULT, WAIT_ABANDONED, WAIT_EVENT, WAIT_FAILED,
+            WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+        },
+        System::Threading::{
+            CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, MUTEX_MODIFY_STATE,
+            OpenEventW, OpenMutexW, ReleaseMutex, ResetEvent, SYNCHRONIZATION_SYNCHRONIZE,
+            SetEvent, WaitForSingleObject,
+        },
+        UI::{
+            Input::{
+                Ime::{IME_CMODE_NATIVE, ImmGetDefaultIMEWnd},
+                KeyboardAndMouse::{
+                    GetAsyncKeyState, GetKeyboardLayout, HKL, INPUT, INPUT_0, INPUT_KEYBOARD,
+                    KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput,
+                    VIRTUAL_KEY,
+                },
+            },
+            WindowsAndMessaging::{
+                CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetWindowThreadProcessId,
+                HC_ACTION, KBDLLHOOKSTRUCT, MSG, MsgWaitForMultipleObjects, PM_REMOVE,
+                PeekMessageW, QS_ALLINPUT, SendMessageW, SetWindowsHookExW, TranslateMessage,
+                UnhookWindowsHookEx, WH_KEYBOARD_LL,
             },
         },
-        WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW,
-            GetWindowThreadProcessId, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, SendMessageW,
-            SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL,
-        },
     },
+    core::w,
+    core::{self, HSTRING, PCWSTR},
 };
 
 const WM_KEYDOWN: u32 = 0x0100;
@@ -33,21 +48,245 @@ const VK_OEM_6: u32 = 0xDD; // ]
 const LLKHF_INJECTED: u32 = 0x10;
 const LANG_CHINESE: u32 = 0x04; // 低 10 位是主语言 ID，0x04 代表中文
 
-static mut HOOK_HANDLE: Option<HHOOK> = None;
+const STOP_EVENT_NAME: PCWSTR = w!("Global\\ChsIMExxStop");
+const INSTANCE_MUTEX_NAME: PCWSTR = w!("Global\\ChsIMExxMutex");
+const POWERSHELL_APP_ID: &str =
+    "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
 
 fn main() {
-    unsafe {
-        // 安装低层键盘钩子
-        HOOK_HANDLE = Some(
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0)
-                .expect("SetWindowsHookExW failed"),
-        );
+    process::exit(match run() {
+        Ok(()) => 0,
+        Err(code) => code,
+    });
+}
 
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).into() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+fn run() -> Result<(), i32> {
+    match parse_command()? {
+        Command::Run => run_start(),
+        Command::Stop => run_stop(),
+    }
+}
+
+enum Command {
+    Run,
+    Stop,
+}
+
+fn parse_command() -> Result<Command, i32> {
+    let mut args = env::args().skip(1);
+    match args.next() {
+        None => Ok(Command::Run),
+        Some(arg) if arg.eq_ignore_ascii_case("stop") => {
+            if args.next().is_some() {
+                eprintln!("额外参数无法识别");
+                Err(1)
+            } else {
+                Ok(Command::Stop)
+            }
         }
+        Some(arg) => {
+            eprintln!("未知参数：{arg}");
+            Err(1)
+        }
+    }
+}
+
+fn run_start() -> Result<(), i32> {
+    let mut guard = InstanceGuard::new().map_err(|err| {
+        eprintln!("创建同步对象失败: {err:?}");
+        1
+    })?;
+
+    let state = guard.acquire().map_err(|msg| {
+        eprintln!("{msg}");
+        1
+    })?;
+
+    let hook = unsafe {
+        SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0).map_err(
+            |err| {
+                eprintln!("安装键盘钩子失败: {err:?}");
+                1
+            },
+        )?
+    };
+
+    match state {
+        InstanceState::Fresh => notify("ChsIMExx 已开启"),
+        InstanceState::Restarted => notify("ChsIMExx 已重启"),
+    }
+
+    unsafe {
+        run_message_loop(guard.stop_event());
+        let _ = UnhookWindowsHookEx(hook);
+    }
+
+    Ok(())
+}
+
+fn run_stop() -> Result<(), i32> {
+    if let Err(msg) = signal_shutdown_request() {
+        eprintln!("{msg}");
+        return Err(1);
+    }
+    notify("ChsIMExx 已关闭");
+    Ok(())
+}
+
+enum InstanceState {
+    Fresh,
+    Restarted,
+}
+
+struct InstanceGuard {
+    mutex: HANDLE,
+    stop_event: HANDLE,
+    owns_mutex: bool,
+}
+
+impl InstanceGuard {
+    fn new() -> core::Result<Self> {
+        let mutex = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX_NAME)? };
+        let stop_event = unsafe { CreateEventW(None, true, false, STOP_EVENT_NAME)? };
+        Ok(Self {
+            mutex,
+            stop_event,
+            owns_mutex: false,
+        })
+    }
+
+    fn acquire(&mut self) -> Result<InstanceState, String> {
+        let wait = unsafe { WaitForSingleObject(self.mutex, 0) };
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            self.owns_mutex = true;
+            unsafe {
+                ResetEvent(self.stop_event).map_err(|_| "无法重置停止事件".to_string())?;
+            }
+            return Ok(InstanceState::Fresh);
+        }
+
+        if wait == WAIT_TIMEOUT {
+            unsafe {
+                SetEvent(self.stop_event).map_err(|_| "无法通知旧实例退出".to_string())?;
+            }
+
+            let wait = unsafe { WaitForSingleObject(self.mutex, 10_000) };
+            if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+                self.owns_mutex = true;
+                unsafe {
+                    ResetEvent(self.stop_event).map_err(|_| "无法重置停止事件".to_string())?;
+                }
+                return Ok(InstanceState::Restarted);
+            } else if wait == WAIT_TIMEOUT {
+                return Err("等待旧实例退出超时".into());
+            } else {
+                return Err("等待旧实例退出失败".into());
+            }
+        }
+
+        if wait == WAIT_FAILED {
+            Err("检测实例状态失败".into())
+        } else {
+            Err("未知的等待状态".into())
+        }
+    }
+
+    fn stop_event(&self) -> HANDLE {
+        self.stop_event
+    }
+}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ResetEvent(self.stop_event);
+            if self.owns_mutex {
+                let _ = ReleaseMutex(self.mutex);
+            }
+            let _ = CloseHandle(self.mutex);
+            let _ = CloseHandle(self.stop_event);
+        }
+    }
+}
+
+fn notify(message: &str) {
+    if let Err(err) = send_toast(message) {
+        eprintln!("发送通知失败: {err:?}");
+    }
+}
+
+fn send_toast(message: &str) -> core::Result<()> {
+    let xml = format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>ChsIMExx</text><text>{}</text></binding></visual></toast>",
+        message
+    );
+
+    let doc = XmlDocument::new()?;
+    doc.LoadXml(&HSTRING::from(xml))?;
+    let toast = ToastNotification::CreateToastNotification(&doc)?;
+    let notifier =
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(POWERSHELL_APP_ID))?;
+    notifier.Show(&toast)?;
+    Ok(())
+}
+
+fn run_message_loop(stop_event: HANDLE) {
+    unsafe {
+        let mut msg = MSG::default();
+        let handles = [stop_event];
+        let queue_index = WAIT_EVENT(WAIT_OBJECT_0.0 + handles.len() as u32);
+
+        loop {
+            let wait = MsgWaitForMultipleObjects(Some(&handles), false, INFINITE, QS_ALLINPUT);
+            if wait == WAIT_OBJECT_0 {
+                break;
+            } else if wait == queue_index {
+                drain_message_queue(&mut msg);
+            } else if wait == WAIT_FAILED {
+                break;
+            } else {
+                drain_message_queue(&mut msg);
+            }
+        }
+    }
+}
+
+fn drain_message_queue(msg: &mut MSG) {
+    unsafe {
+        while PeekMessageW(msg, None, 0, 0, PM_REMOVE).into() {
+            let _ = TranslateMessage(msg);
+            DispatchMessageW(msg);
+        }
+    }
+}
+
+fn signal_shutdown_request() -> Result<(), String> {
+    unsafe {
+        let event = OpenEventW(
+            EVENT_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            STOP_EVENT_NAME,
+        )
+        .ok();
+
+        if let Some(event) = event {
+            SetEvent(event).map_err(|_| "无法发送停止请求".to_string())?;
+            let _ = CloseHandle(event);
+
+            if let Ok(mutex) = OpenMutexW(
+                SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE,
+                false,
+                INSTANCE_MUTEX_NAME,
+            ) {
+                let wait = WaitForSingleObject(mutex, 10_000);
+                if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+                    let _ = ReleaseMutex(mutex);
+                }
+                let _ = CloseHandle(mutex);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -57,7 +296,6 @@ unsafe extern "system" fn low_level_keyboard_proc(
     l_param: LPARAM,
 ) -> LRESULT {
     if n_code == HC_ACTION as i32 {
-        // l_param 指向 KBDLLHOOKSTRUCT
         let kb = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
 
         let vk = kb.vkCode;
@@ -68,7 +306,6 @@ unsafe extern "system" fn low_level_keyboard_proc(
 
         let is_bracket = vk == VK_OEM_4 || vk == VK_OEM_6;
 
-        // 只关心 Shift+[ 和 Shift+]
         let shift_down = unsafe { GetAsyncKeyState(VK_SHIFT) < 0 };
 
         if (is_keydown || is_keyup)
@@ -77,29 +314,25 @@ unsafe extern "system" fn low_level_keyboard_proc(
             && kb.flags.0 & LLKHF_INJECTED == 0
             && unsafe { is_chinese_input_for_foreground() }
         {
-            // 在中文输入法下拦截原按键
             if is_keydown {
                 let ch = if vk == VK_OEM_4 { '「' } else { '」' };
                 unsafe {
                     send_unicode_char(ch);
                 }
             }
-            return LRESULT(1); // 非零表示吃掉消息
+            return LRESULT(1);
         }
     }
 
-    unsafe { CallNextHookEx(HOOK_HANDLE, n_code, w_param, l_param) }
+    unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
 }
 
-// 只在：当前键盘布局是中文，并且 IME 处于“中文模式”时返回 true
 unsafe fn is_chinese_input_for_foreground() -> bool {
-    // 先锁定前台窗口
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return false;
     }
 
-    // 通过线程拿到 HKL，只在主语言是中文时继续往下
     let mut _pid = 0u32;
     let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut _pid)) };
 
@@ -107,20 +340,16 @@ unsafe fn is_chinese_input_for_foreground() -> bool {
     let lang_id = hkl.0 as u32 & 0xFFFF;
     let primary_lang = lang_id & 0x3FF;
     if primary_lang != LANG_CHINESE {
-        // ENG、美式键盘等直接视为“非中文模式”
         return false;
     }
 
-    // 拿到这个窗口对应的 IME 窗口句柄
     let ime_hwnd = unsafe { ImmGetDefaultIMEWnd(hwnd) };
     if ime_hwnd.0.is_null() {
-        // 理论上不太会发生，如果拿不到就保守地当作“非中文模式”
         return false;
     }
 
-    // 通过 WM_IME_CONTROL 询问当前转换模式
     const WM_IME_CONTROL: u32 = 0x0283;
-    const IMC_GETCONVERSIONMODE: usize = 0x0001; // wParam 值
+    const IMC_GETCONVERSIONMODE: usize = 0x0001;
 
     let mode = unsafe {
         SendMessageW(
@@ -132,11 +361,9 @@ unsafe fn is_chinese_input_for_foreground() -> bool {
     }
     .0 as u32;
 
-    // 只有在“本地语言模式”（微软拼音的中文模式）下，这一位才为 1
     mode & IME_CMODE_NATIVE.0 != 0
 }
 
-// 通过 SendInput 发送一个 Unicode 字符
 unsafe fn send_unicode_char(ch: char) {
     let mut inputs = [INPUT {
         r#type: INPUT_KEYBOARD,
@@ -151,10 +378,8 @@ unsafe fn send_unicode_char(ch: char) {
         },
     }];
 
-    // keydown
     let _ = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
 
-    // keyup
     inputs[0].Anonymous.ki.dwFlags = KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0);
     let _ = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
 }
