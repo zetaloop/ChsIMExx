@@ -91,6 +91,7 @@ fn parse_command() -> Result<Command, i32> {
             let rest_has_extra = args.next().is_some();
 
             let result = match cmd {
+                "start" | "--start" => Some(Command::Run),
                 "stop" | "--stop" => Some(Command::Stop),
                 "version" | "--version" => Some(Command::Version),
                 _ => None,
