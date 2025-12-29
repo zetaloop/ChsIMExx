@@ -13,16 +13,17 @@ use windows::{
         },
         Security::{
             Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+            GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
+            TOKEN_QUERY, TokenElevation,
         },
         System::Console::{
             ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, FreeConsole, GetStdHandle,
             STD_OUTPUT_HANDLE, WriteConsoleW,
         },
         System::Threading::{
-            CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, MUTEX_MODIFY_STATE,
-            OpenEventW, OpenMutexW, ReleaseMutex, ResetEvent, SYNCHRONIZATION_SYNCHRONIZE,
-            SetEvent, WaitForSingleObject,
+            CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, GetCurrentProcess, INFINITE,
+            MUTEX_MODIFY_STATE, OpenEventW, OpenMutexW, OpenProcessToken, ReleaseMutex, ResetEvent,
+            SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
         },
         UI::{
             Input::{
@@ -177,7 +178,7 @@ fn run_version() -> Result<(), i32> {
     let message = format!("v{VERSION}");
     notify(&message);
     if let Some(console) = ConsoleSession::ensure() {
-        console.println(&format!("\r\n[ChsIME] {message}"));
+        console.println(&format!("\r\n{} {message}", console_prefix()));
         Ok(())
     } else {
         Err(1)
@@ -280,6 +281,43 @@ impl Drop for InstanceGuard {
     }
 }
 
+fn is_elevated() -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && elevation.TokenIsElevated != 0
+    }
+}
+
+fn console_prefix() -> &'static str {
+    if is_elevated() {
+        "[ChsIME Admin]"
+    } else {
+        "[ChsIME]"
+    }
+}
+
+fn toast_title() -> &'static str {
+    if is_elevated() {
+        "ChsIME (Admin)"
+    } else {
+        "ChsIMExx"
+    }
+}
+
 fn notify(message: &str) {
     if let Err(err) = send_toast(message) {
         log_error(&format!("发送通知失败: {err:?}"));
@@ -288,22 +326,24 @@ fn notify(message: &str) {
 
 fn log_to_console(message: &str) {
     if let Some(console) = ConsoleSession::attach_temporary() {
-        console.println(&format!("\r\n[ChsIME] {message}"));
+        console.println(&format!("\r\n{} {message}", console_prefix()));
     }
 }
 
 fn log_error(message: &str) {
     eprintln!("{message}");
+    let prefix = console_prefix();
     if let Some(console) = ConsoleSession::attach_temporary() {
-        console.println(&format!("\r\n[ChsIME][错误] {message}"));
+        console.println(&format!("\r\n{prefix}[错误] {message}"));
     } else if let Some(console) = ConsoleSession::ensure() {
-        console.println(&format!("\r\n[ChsIME][错误] {message}"));
+        console.println(&format!("\r\n{prefix}[错误] {message}"));
     }
 }
 
 fn send_toast(message: &str) -> core::Result<()> {
     let xml = format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>ChsIMExx</text><text>{}</text></binding></visual></toast>",
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        toast_title(),
         message
     );
 
