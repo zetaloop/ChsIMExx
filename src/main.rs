@@ -7,9 +7,13 @@ use windows::{
     UI::Notifications::{ToastNotification, ToastNotificationManager},
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, GetLastError, HANDLE, HWND,
-            INVALID_HANDLE_VALUE, LPARAM, LRESULT, WAIT_ABANDONED, WAIT_EVENT, WAIT_FAILED,
-            WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, GetLastError, HANDLE, HLOCAL,
+            HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, LocalFree, WAIT_ABANDONED, WAIT_EVENT,
+            WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+        },
+        Security::{
+            Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
         System::Console::{
             ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, FreeConsole, GetStdHandle,
@@ -193,8 +197,28 @@ struct InstanceGuard {
 
 impl InstanceGuard {
     fn new() -> core::Result<Self> {
-        let mutex = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX_NAME)? };
-        let stop_event = unsafe { CreateEventW(None, true, false, STOP_EVENT_NAME)? };
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                w!("D:(A;;GA;;;WD)"), // Everyone: Generic All
+                1,
+                &mut sd,
+                None,
+            )?;
+        }
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: false.into(),
+        };
+
+        let mutex = unsafe { CreateMutexW(Some(&sa), false, INSTANCE_MUTEX_NAME)? };
+        let stop_event = unsafe { CreateEventW(Some(&sa), true, false, STOP_EVENT_NAME)? };
+
+        if !sd.0.is_null() {
+            unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+        }
+
         Ok(Self {
             mutex,
             stop_event,
