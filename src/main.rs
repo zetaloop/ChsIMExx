@@ -7,7 +7,7 @@ use windows::{
     UI::Notifications::{ToastNotification, ToastNotificationManager},
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, GetLastError, HANDLE,
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, GetLastError, HANDLE, HWND,
             INVALID_HANDLE_VALUE, LPARAM, LRESULT, WAIT_ABANDONED, WAIT_EVENT, WAIT_FAILED,
             WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
         },
@@ -30,10 +30,11 @@ use windows::{
                 },
             },
             WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetWindowThreadProcessId,
-                HC_ACTION, KBDLLHOOKSTRUCT, MSG, MsgWaitForMultipleObjects, PM_REMOVE,
-                PeekMessageW, QS_ALLINPUT, SendMessageW, SetWindowsHookExW, TranslateMessage,
-                UnhookWindowsHookEx, WH_KEYBOARD_LL,
+                CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow,
+                GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
+                MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostMessageW, QS_ALLINPUT,
+                SendMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+                WH_KEYBOARD_LL, WM_CHAR,
             },
         },
     },
@@ -446,12 +447,20 @@ unsafe extern "system" fn low_level_keyboard_proc(
             && shift_down
             && !other_modifiers_down
             && kb.flags.0 & LLKHF_INJECTED == 0
-            && unsafe { is_chinese_input_for_foreground() }
+            && let Some(hwnd) = unsafe { is_chinese_input_for_foreground() }
         {
             if is_keydown {
                 let ch = if vk == VK_OEM_4 { '「' } else { '」' };
                 unsafe {
-                    send_unicode_char(ch);
+                    let mut class_name = [0u16; 256];
+                    let len = GetClassNameW(hwnd, &mut class_name);
+                    let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
+                    let use_post = class_str.starts_with("Qt");
+                    if use_post {
+                        let _ = PostMessageW(Some(hwnd), WM_CHAR, WPARAM(ch as usize), LPARAM(1));
+                    } else {
+                        send_unicode_char(ch);
+                    }
                 }
             }
             return LRESULT(1);
@@ -461,10 +470,10 @@ unsafe extern "system" fn low_level_keyboard_proc(
     unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
 }
 
-unsafe fn is_chinese_input_for_foreground() -> bool {
+unsafe fn is_chinese_input_for_foreground() -> Option<HWND> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
-        return false;
+        return None;
     }
 
     let mut _pid = 0u32;
@@ -474,12 +483,12 @@ unsafe fn is_chinese_input_for_foreground() -> bool {
     let lang_id = hkl.0 as u32 & 0xFFFF;
     let primary_lang = lang_id & 0x3FF;
     if primary_lang != LANG_CHINESE {
-        return false;
+        return None;
     }
 
     let ime_hwnd = unsafe { ImmGetDefaultIMEWnd(hwnd) };
     if ime_hwnd.0.is_null() {
-        return false;
+        return None;
     }
 
     const WM_IME_CONTROL: u32 = 0x0283;
@@ -495,7 +504,11 @@ unsafe fn is_chinese_input_for_foreground() -> bool {
     }
     .0 as u32;
 
-    mode & IME_CMODE_NATIVE.0 != 0
+    if mode & IME_CMODE_NATIVE.0 != 0 {
+        Some(hwnd)
+    } else {
+        None
+    }
 }
 
 unsafe fn send_unicode_char(ch: char) {
