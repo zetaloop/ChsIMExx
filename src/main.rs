@@ -1,17 +1,20 @@
 #![windows_subsystem = "windows"]
 
 mod console;
+mod foreground;
 mod hook;
 mod instance;
 mod notify;
 
 use std::{env, process};
 
-use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+use windows::Win32::UI::{
+    Accessibility::UnhookWinEvent,
+    WindowsAndMessaging::{SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL},
 };
 
 use console::{ConsoleSession, console_prefix, log_error, log_to_console};
+use foreground::allow_foreground_activation;
 use hook::{low_level_keyboard_proc, run_message_loop};
 use instance::{InstanceGuard, InstanceState, signal_shutdown_request};
 use notify::notify;
@@ -80,6 +83,11 @@ fn run_start() -> Result<(), i32> {
         1
     })?;
 
+    let foreground_hook = allow_foreground_activation().map_err(|msg| {
+        log_error(&msg);
+        1
+    })?;
+
     let hook = unsafe {
         SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0).map_err(
             |err| {
@@ -99,6 +107,7 @@ fn run_start() -> Result<(), i32> {
     unsafe {
         run_message_loop(guard.stop_event());
         let _ = UnhookWindowsHookEx(hook);
+        let _ = UnhookWinEvent(foreground_hook);
     }
 
     Ok(())
