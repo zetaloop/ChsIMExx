@@ -1,4 +1,4 @@
-use std::ptr;
+use std::{ffi::c_void, ptr};
 
 use windows::{
     Win32::{
@@ -6,8 +6,9 @@ use windows::{
         UI::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             WindowsAndMessaging::{
-                EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetForegroundWindow, SetPropW,
-                WINEVENT_OUTOFCONTEXT,
+                EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetForegroundWindow,
+                SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_SETFOREGROUNDLOCKTIMEOUT, SPIF_SENDCHANGE,
+                SPIF_UPDATEINIFILE, SetPropW, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT,
             },
         },
     },
@@ -15,6 +16,38 @@ use windows::{
 };
 
 pub fn allow_foreground_activation() -> Result<HWINEVENTHOOK, String> {
+    allow_regular_foreground_activation()?;
+    allow_consent_foreground_activation()
+}
+
+fn allow_regular_foreground_activation() -> Result<(), String> {
+    unsafe {
+        SystemParametersInfoW(
+            SPI_SETFOREGROUNDLOCKTIMEOUT,
+            0,
+            None,
+            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+        )
+        .map_err(|err| format!("关闭前台窗口锁定超时失败: {err:?}"))?;
+
+        let mut timeout = u32::MAX;
+        SystemParametersInfoW(
+            SPI_GETFOREGROUNDLOCKTIMEOUT,
+            0,
+            Some((&raw mut timeout).cast::<c_void>()),
+            Default::default(),
+        )
+        .map_err(|err| format!("读取前台窗口锁定超时失败: {err:?}"))?;
+
+        if timeout != 0 {
+            return Err(format!("前台窗口锁定超时仍为 {timeout} 毫秒"));
+        }
+    }
+
+    Ok(())
+}
+
+fn allow_consent_foreground_activation() -> Result<HWINEVENTHOOK, String> {
     unsafe {
         let hook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
