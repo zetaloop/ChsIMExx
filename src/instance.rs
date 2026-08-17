@@ -50,12 +50,24 @@ impl InstanceGuard {
             bInheritHandle: false.into(),
         };
 
-        let mutex = unsafe { CreateMutexW(Some(&sa), false, INSTANCE_MUTEX_NAME)? };
-        let stop_event = unsafe { CreateEventW(Some(&sa), true, false, STOP_EVENT_NAME)? };
+        let handles = unsafe {
+            match CreateMutexW(Some(&sa), false, INSTANCE_MUTEX_NAME) {
+                Ok(mutex) => match CreateEventW(Some(&sa), true, false, STOP_EVENT_NAME) {
+                    Ok(stop_event) => Ok((mutex, stop_event)),
+                    Err(err) => {
+                        let _ = CloseHandle(mutex);
+                        Err(err)
+                    }
+                },
+                Err(err) => Err(err),
+            }
+        };
 
         if !sd.0.is_null() {
             unsafe { LocalFree(Some(HLOCAL(sd.0))) };
         }
+
+        let (mutex, stop_event) = handles?;
 
         Ok(Self {
             mutex,
