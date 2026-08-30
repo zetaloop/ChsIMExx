@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $version = $env:INPUT_VERSION -replace "^v", ""
+          } else {
+            $version = $env:GITHUB_REF_NAME -replace "^v", ""
+          }
+          $packageVersion = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($version -ne $packageVersion) {
+            Write-Error "Version $version does not match Cargo.toml version $packageVersion"
+            exit 1
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          $archive = "chsimexx-v$env:VERSION-windows-x86_64.zip"
+          Compress-Archive -Path target/release/chsimexx.exe -DestinationPath $archive
+          "ARCHIVE=$archive" >> $env:GITHUB_ENV
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: gh release create $env:TAG $env:ARCHIVE --generate-notes --target $env:GITHUB_SHA --title "ChsIMExx $env:TAG"
