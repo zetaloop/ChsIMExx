@@ -27,3 +27,5 @@ scoop install chsimexx
 - `chsimexx stop` 停止
 - `chsimexx uninstall` 卸载
 - `chsimexx version` 显示版本
+
+_顺便一提：[SCIM++](https://github.com/zetaloop/SCIMxx)_
