@@ -83,7 +83,7 @@ fn write_console_line(message: &str) {
     }
 }
 
-fn is_elevated() -> bool {
+pub fn is_elevated() -> bool {
     unsafe {
         let mut token = HANDLE::default();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {

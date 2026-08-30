@@ -5,6 +5,7 @@ mod foreground;
 mod hook;
 mod instance;
 mod notify;
+mod startup;
 
 use std::{env, process};
 
@@ -13,7 +14,7 @@ use windows::Win32::UI::{
     WindowsAndMessaging::{SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL},
 };
 
-use console::{ConsoleSession, console_prefix, log_error, log_to_console};
+use console::{ConsoleSession, console_prefix, is_elevated, log_error, log_to_console};
 use foreground::allow_foreground_activation;
 use hook::{low_level_keyboard_proc, run_message_loop};
 use instance::{InstanceGuard, InstanceState, signal_shutdown_request};
@@ -32,6 +33,8 @@ fn run() -> Result<(), i32> {
     match parse_command()? {
         Command::Run => run_start(),
         Command::Stop => run_stop(),
+        Command::Install => run_install(),
+        Command::Uninstall => run_uninstall(),
         Command::Version => run_version(),
     }
 }
@@ -39,6 +42,8 @@ fn run() -> Result<(), i32> {
 enum Command {
     Run,
     Stop,
+    Install,
+    Uninstall,
     Version,
 }
 
@@ -53,6 +58,8 @@ fn parse_command() -> Result<Command, i32> {
             let result = match cmd {
                 "start" | "--start" => Some(Command::Run),
                 "stop" | "--stop" => Some(Command::Stop),
+                "install" | "--install" => Some(Command::Install),
+                "uninstall" | "--uninstall" => Some(Command::Uninstall),
                 "version" | "--version" => Some(Command::Version),
                 _ => None,
             };
@@ -73,6 +80,15 @@ fn parse_command() -> Result<Command, i32> {
 }
 
 fn run_start() -> Result<(), i32> {
+    if !is_elevated()
+        && startup::start().map_err(|msg| {
+            log_error(&msg);
+            1
+        })?
+    {
+        return Ok(());
+    }
+
     let mut guard = InstanceGuard::new().map_err(|err| {
         log_error(&format!("创建同步对象失败: {err:?}"));
         1
@@ -126,6 +142,56 @@ fn run_stop() -> Result<(), i32> {
             notify(MESSAGE);
             log_to_console(MESSAGE);
             Ok(())
+        }
+        Err(msg) => {
+            log_error(&msg);
+            Err(1)
+        }
+    }
+}
+
+fn run_install() -> Result<(), i32> {
+    if !is_elevated() {
+        return run_elevated("install");
+    }
+
+    startup::install().map_err(|msg| {
+        log_error(&msg);
+        1
+    })?;
+
+    const MESSAGE: &str = "已安装";
+    notify(MESSAGE);
+    log_to_console(MESSAGE);
+    Ok(())
+}
+
+fn run_uninstall() -> Result<(), i32> {
+    if !is_elevated() {
+        return run_elevated("uninstall");
+    }
+
+    signal_shutdown_request().map_err(|msg| {
+        log_error(&msg);
+        1
+    })?;
+    startup::uninstall().map_err(|msg| {
+        log_error(&msg);
+        1
+    })?;
+
+    const MESSAGE: &str = "已卸载";
+    notify(MESSAGE);
+    log_to_console(MESSAGE);
+    Ok(())
+}
+
+fn run_elevated(command: &str) -> Result<(), i32> {
+    match startup::elevate(command) {
+        Ok(0) => Ok(()),
+        Ok(code) => {
+            log_error(&format!("管理员操作失败，退出代码: {code}"));
+            Err(code)
         }
         Err(msg) => {
             log_error(&msg);
