@@ -1,10 +1,13 @@
-use std::{ffi::c_void, ptr};
+use std::{ffi::c_void, mem::size_of, ptr};
 
 use windows::{
     Win32::{
         Foundation::{HANDLE, HWND},
         UI::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
+            Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_MENU,
+            },
             WindowsAndMessaging::{
                 EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetForegroundWindow,
                 SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_SETFOREGROUNDLOCKTIMEOUT, SPIF_SENDCHANGE,
@@ -21,7 +24,30 @@ pub fn allow_foreground_activation() -> Result<HWINEVENTHOOK, String> {
 }
 
 fn allow_regular_foreground_activation() -> Result<(), String> {
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        },
+    ];
+
     unsafe {
+        SendInput(&inputs, size_of::<INPUT>() as i32);
         SystemParametersInfoW(
             SPI_SETFOREGROUNDLOCKTIMEOUT,
             0,
