@@ -4,6 +4,7 @@ mod console;
 mod foreground;
 mod hook;
 mod instance;
+mod layout;
 mod notify;
 mod startup;
 
@@ -80,7 +81,8 @@ fn parse_command() -> Result<Command, i32> {
 }
 
 fn run_start() -> Result<(), i32> {
-    if !is_elevated()
+    let elevated = is_elevated();
+    if !elevated
         && startup::start().map_err(|msg| {
             log_error(&msg);
             1
@@ -98,6 +100,14 @@ fn run_start() -> Result<(), i32> {
         log_error(&msg);
         1
     })?;
+
+    let _layouts = elevated
+        .then(layout::Monitor::start)
+        .transpose()
+        .map_err(|err| {
+            log_error(&format!("监听键盘布局失败: {err}"));
+            1
+        })?;
 
     let foreground_hook = allow_foreground_activation().map_err(|msg| {
         log_error(&msg);
